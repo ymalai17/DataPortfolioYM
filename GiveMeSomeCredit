@@ -1,0 +1,149 @@
+Banks play a crucial role in market economies. They decide who can get finance and on what terms and can make or break investment decisions. For markets and society to function, individuals and companies need access to credit. 
+Credit scoring algorithms, which make a guess at the probability of default, are the method banks use to determine whether or not a loan should be granted. This competition requires participants to improve on the state of the art in credit scoring, by predicting the probability that somebody will experience financial distress in the next two years.
+The goal of this competition is to build a model that borrowers can use to help make the best financial decisions.
+Historical data are provided on 250,000 borrowers and the prize pool is $5,000 ($3,000 for first, $1,500 for second and $500 for third).
+
+Link: https://www.kaggle.com/competitions/GiveMeSomeCredit/overview
+
+#ML Phase 3 - Dom, Shaunit and Yash
+
+#LOAD
+library(randomForest)
+source('BabsonAnalytics.R') #<--- Had functions, in this case we used this to calculate benchmark. 
+library(mice)
+library(rpart)
+library(rpart.plot)
+
+df = read.csv("cs-training.csv")
+str(df)
+
+#MANAGE
+df$SeriousDlqin2yrs = as.logical(df$SeriousDlqin2yrs)
+df$SerialNumber = NULL
+
+
+#Predictive Imputation
+idx = is.na(df$SeriousDlqin2yrs)
+df$SeriousDlqin2yrs[idx]
+impute_rf = mice(df, m=1, method = 'rf')
+df_rf = complete(impute_rf)
+df$seriousDlqin2yrs[idx]
+
+View(df_rf)
+
+#PARTITION
+training_cases = sample(nrow(df_rf), round(nrow(df_rf) * 0.6))
+training = df_rf[training_cases, ]
+test = df_rf[-training_cases, ]
+
+#Checking if NA values are still there
+
+sum(is.na(df_rf$MonthlyIncome))
+sum(is.na(df_rf$NumberOfDependents))
+sum(is.na(training))
+
+#Random Forest
+rf = randomForest(SeriousDlqin2yrs ~., data = training, ntree = 50)
+varImpPlot(rf)
+
+
+#Predict
+pred_rf = predict(rf, test) > 0.5
+
+#Evaluate
+observations = test$SeriousDlqin2yrs
+error_rf = sum(pred_rf != observations)/nrow(test)
+
+error_rf_bench = benchmarkErrorRate(training$SeriousDlqin2yrs, test$SeriousDlqin2yrs)
+
+
+#Logistic Regression
+library(caret)
+
+glm1 = glm(SeriousDlqin2yrs ~., data = training, family = binomial)
+glm1 = step(glm1) # Removes all the unnecessary variables
+summary(glm1)
+
+#Predict
+predictions = predict(glm1, test, type = "response")
+predictions_tf = (predictions > 0.5)
+
+
+
+#Evaluate
+observations = test$SeriousDlqin2yrs
+table(predictions_tf, observations)
+table (predictions_tf, observations)/nrow(test) #Confusion Matrix as a percentage
+
+accuracy_rate_glm = sum(predictions_tf == observations)/nrow(test)
+
+print(sum(predictions_tf == observations))
+
+# percentage of accurate predictions
+error_glm_rate = 1 - accuracy_rate_glm #or sum (predictions != observations)/nrow(test) error rate
+
+error_glm_bench = benchmarkErrorRate(training$SeriousDlqin2yrs, test$SeriousDlqin2yrs)
+
+ROCChart(observations, predictions)
+
+liftChart(observations, predictions)
+
+
+#Classification Tree
+
+#Build
+model_default = rpart(SeriousDlqin2yrs~., data = training)
+rpart.plot(model_default)
+
+#Predict
+predictions = predict(model_default, test) > 0.5
+observations = test$SeriousDlqin2yrs
+
+error_tree = sum(predictions != observations)/nrow(test)
+error_tree_bench = benchmarkErrorRate(training$SeriousDlqin2yrs, test$SeriousDlqin2yrs)
+
+
+stopping_rules = rpart.control(minsplit=2,mindbucket=1,cp=-1)
+model_default = rpart(SeriousDlqin2yrs~., data = training, control = stopping_rules)
+
+predictions_stopping_rules = predict(model_default, test) > 0.5
+error_stopping_rules = sum(predictions_stopping_rules != observations)/nrow(test)
+
+
+#Pruning
+model = easyPrune(model_default)
+predictions_pruned = predict(model, test) > 0.5
+error_pruned = sum(predictions_pruned != observations)/nrow(test)
+table(predictions_pruned, observations)
+rpart.plot(model)
+
+#Stacking
+
+#Setting up models for binding
+pred_rf_full = predict(rf, df_rf)
+
+pred_glm1_full = predict(glm1, df_rf)
+
+pred_tree_full = predict(model, df_rf)
+
+
+#Partition
+df_stack = cbind(df_rf, pred_glm1_full, pred_tree_full, pred_rf_full)
+train_stack = df_stack[training_cases, ]
+test_stack = df_stack[-training_cases, ]
+
+
+#Build
+model_stack = glm(SeriousDlqin2yrs ~., data = train_stack, family = binomial)
+model_stack = step(model_stack)
+
+
+#Evaluate
+
+pred_stacked = predict(model_stack, test_stack, type="response")
+pred_stacked = (pred_stacked) > 0.5
+
+
+error_stacked = sum(pred_stacked != test_stack$SeriousDlqin2yrs)/nrow(test_stack)
+
+bench_stacked = benchmarkErrorRate(train_stack$SeriousDlqin2yrs, test_stack$SeriousDlqin2yrs)
