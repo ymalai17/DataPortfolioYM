@@ -1,0 +1,56 @@
+-Provides news about the company you wish to search.
+
+import requests
+from bs4 import BeautifulSoup
+import urllib.parse
+import pandas as pd
+from textblob import TextBlob
+import os
+
+# Define the CSV file name
+csv_file_name = 'news_headlines.csv'
+
+# Check if the CSV file exists
+if os.path.exists(csv_file_name):
+    # Load existing data from the CSV file
+    df_all = pd.read_csv(csv_file_name)
+else:
+    # Create a new dataframe
+    df_all = pd.DataFrame(columns=['Company_Name', 'Link', 'Headline', 'Sentiment_Score'])
+
+# Get the company name from the user
+company_name = input("Enter the company name: ")
+
+# Encode the search query
+query = urllib.parse.quote(company_name)
+
+# Construct the Google search URL
+url = f"https://www.google.com/search?q={query}&tbm=nws"
+
+# Set headers to simulate a request from a web browser
+headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'}
+
+# Send an HTTP GET request and get the HTML content
+response = requests.get(url, headers=headers)
+soup = BeautifulSoup(response.content, "html.parser")
+
+# Find all the links in the search results and filter out the irrelevant ones
+links = [a["href"] for a in soup.find_all("a") if a.get("href") and a.get("href").startswith("http") and "google" not in a.get("href")]
+
+# Create a dataframe with the links
+df_links = pd.DataFrame({'Company_Name': [company_name]*len(links), 'Link': links})
+
+# Extract the headlines and perform sentiment analysis
+df_links['Headline'] = df_links['Link'].apply(lambda link: BeautifulSoup(requests.get(link, headers=headers).content, "html.parser").find("h1").text.strip() if BeautifulSoup(requests.get(link, headers=headers).content, "html.parser").find("h1") else "")
+
+df_links['Sentiment_Score'] = df_links['Headline'].apply(lambda headline: TextBlob(headline).sentiment.polarity)
+
+# Append the new data to the existing dataframe
+df_all = pd.concat([df_all, df_links], ignore_index=True)
+
+# Save the updated dataframe to the CSV file
+df_all.to_csv(csv_file_name, index=False)
+
+# Print the data
+print(df_all)
