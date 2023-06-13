@@ -1,0 +1,65 @@
+import pandas as pd
+import re
+import os.path
+
+# Load the CSV files into dataframes and save the filenames in a list and ensure the encodings of the files are correct 
+file1 = "foia-504-fy1991-fy2009-asof-221231.csv"
+df1 = pd.read_csv(file1)
+file2 = "foia-504-fy2010-present-asof-221231.csv"
+df2 = pd.read_csv(file2)
+file3 = "foia-7afy1991-fy1999-asof-221231.csv"
+df3 = pd.read_csv(file3, encoding="ISO-8859-1")
+file4 = "foia-7afy2000-fy2009-asof-221231.csv"
+df4 = pd.read_csv(file4, encoding="ISO-8859-1")
+file5 = "foia-7afy2010-fy2019-asof-221231.csv"
+df5 = pd.read_csv(file5, encoding="ISO-8859-1")
+file6 = "foia-7afy2020-present-asof-221231.csv"
+df6 = pd.read_csv(file6, encoding="ISO-8859-1")
+
+# Combine all dataframes into a list and create a bigger dataframe
+dataframes = [(df1, file1), (df2, file2), (df3, file3), (df4, file4), (df5, file5), (df6, file6)]
+
+# Function to search for text in the dataframes, 
+def search_dataframes(text, results_df):
+    # Create a regex pattern to match the text with any characters before or after it
+    pattern = re.compile(f".*{text}.*", re.IGNORECASE)
+    for df, file in dataframes:
+        # Iterate over each cell in the dataframe
+        for index, row in df.iterrows():
+            for col_name in df.columns:
+                cell_value = str(row[col_name])
+                if pattern.match(cell_value):
+                    # Append the search results to the output dataframe (index is added by 2,as we want the correct cell number, because in csv file it ingnore the first 2 rows)
+                    results_df = results_df.append({"Sheet": file, "Cell": index+2, "Column": col_name, 
+                                                    "Matched Text": cell_value}, ignore_index=True)
+
+    # Ask user for more text to search or Quit
+    while True:
+        more_text = input("Enter more text to search or type 00000 to exit: ")
+        if more_text.lower() == "00000":
+            # Export the results to a CSV file
+            # If the file already exists, append the results to it
+            if os.path.isfile("search_results.csv"):
+                results_df.to_csv("search_results.csv", index=False, mode="a", header=False)
+            else:
+                results_df.to_csv("search_results.csv", index=False)
+            return
+        else:
+            # Continue searching with the new text
+            search_dataframes(more_text, results_df)
+
+# Create an empty dataframe to store the search results
+results_df = pd.DataFrame(columns=["Sheet", "Cell", "Column", "Matched Text"])
+
+# Ask user for the text to search
+search_text = input("Enter the text to search: ")
+search_dataframes(search_text, results_df)
+
+# Export the results to a CSV file
+# If the file already exists, append the results to it
+if os.path.isfile("search_results.csv"):
+    results_df.to_csv("search_results.csv", index=False, mode="a", header=False)
+else:
+    results_df.to_csv("search_results.csv", index=False)
+
+print("Search results saved to search_results.csv")   
