@@ -1,0 +1,111 @@
+Welcome to the year 2912, where your data science skills are needed to solve a cosmic mystery. 
+We've received a transmission from four lightyears away and things aren't looking good.
+The Spaceship Titanic was an interstellar passenger liner launched a month ago. 
+With almost 13,000 passengers on board, the vessel set out on its maiden voyage transporting emigrants from our solar system to three newly habitable exoplanets orbiting nearby stars.
+While rounding Alpha Centauri en route to its first destination—the torrid 55 Cancri E—the unwary Spaceship Titanic collided with a spacetime anomaly hidden within a dust cloud. Sadly, it met a similar fate as its namesake from 1000 years before. 
+Though the ship stayed intact, almost half of the passengers were transported to an alternate dimension!To help rescue crews and retrieve the lost passengers, you are challenged to predict which passengers were transported by the anomaly using records recovered from the spaceship’s damaged computer system.
+Help save them and change history!
+
+Link: https://www.kaggle.com/competitions/spaceship-titanic/overview
+
+Done in R.
+
+#Loading libraries
+library(tidyverse)
+library(caret)
+library(mice)
+library(missMethods)
+library(randomForest)
+library(Hmisc)
+library(rpart)
+library(rpart.plot)
+source('BabsonAnalytics.R')
+library(corrplot)
+
+#Loading Data
+df <- read.csv("train.csv")
+
+#Managing Data
+df$Transported <- as.factor(df$Transported)
+
+
+#Checking Nas
+df[df == ''] <- NA
+
+df %>% is.na() %>% sum()
+df %>%
+  select(everything()) %>%
+  summarise_all(funs(sum(is.na(.)))) %>%
+  t()
+
+#EDA visualizations
+df %>%
+  ggplot(aes(x = Age, fill = Transported)) +
+  geom_histogram(color="#E69F00", alpha = 0.6) +
+  labs(title = "Histogram of Age with Transported") +
+  xlab("Age") +
+  ylab("Count")
+
+df %>%
+  ggplot(aes(x = Age, fill = Destination)) +
+  geom_histogram(color="#E69F00", alpha = 0.6) +
+  labs(title = "Histogram of Age with Destination") +
+  xlab("Age") +
+  ylab("Count")
+
+
+#Imputing values using median and mode imputation
+df <- df %>%
+  mutate_if(is.numeric, function(x) ifelse(is.na(x), median(x, na.rm = TRUE), x)) %>%
+  impute_mode()
+
+df <- df %>% select(-c(Name,Cabin,PassengerId))
+
+#Partitioning
+training_cases = sample(nrow(df), round(nrow(df) * 0.670239013107))
+training = df[training_cases, ]
+test1 = df[-training_cases, ]
+
+training <- cbind(training, transport)
+
+#Random Forest
+rf = randomForest(Transported ~., data = training, ntree = 500)
+varImpPlot(rf)
+
+#Predict/Evaluate RF
+pred_rf = predict(rf, test1)
+observations = test1$Transported
+error_rf = sum(pred_rf != observations)/nrow(test1)
+
+error_rf_bench = benchmarkErrorRate(training$Transported, test1$Transported)
+
+
+#Build Class Tree
+model_default = rpart(Transported~., data = training)
+rpart.plot(model_default)
+
+#Predict
+predictions = predict(model_default, test1, type = "class")
+observations = test1$Transported
+
+error_tree = sum(predictions != observations)/nrow(test1)
+error_tree_bench = benchmarkErrorRate(training$Transported, test1$Transported)
+
+
+stopping_rules = rpart.control(minsplit=2,mindbucket=1,cp=-1)
+model_default = rpart(Transported~., data = training, control = stopping_rules)
+
+predictions_stopping_rules = predict(model_default, test1, type = "class")
+error_stopping_rules = sum(predictions_stopping_rules != observations)/nrow(test1)
+
+
+#Pruning
+model = easyPrune(model_default)
+predictions_pruned = predict(model, test1, type = "class")
+error_pruned = sum(predictions_pruned != observations)/nrow(test1)
+table(predictions_pruned, observations)
+rpart.plot(model)
+
+
+view(pred_rf)
+write.csv(pred_rf, file = "sample_submission.csv")
