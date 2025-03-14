@@ -1,0 +1,265 @@
+library(tidyverse)
+library(nflfastR)
+library(nflreadr)
+library(vip)
+library(caret)
+library(xgboost)
+library(zoo)
+library(vars)
+library(tseries)
+library(forecast)
+library(ggthemes)
+
+#This is a code sample of a model
+
+#loading data
+ff2 <- load_ff_opportunity(seasons = (2018:2023), stat_type = "weekly") %>% filter(position == "RB")
+df2 <- load_player_stats(seasons = (2018:2023)) %>% filter(position == "RB")
+
+colSums(is.na(ff2))
+
+snaps <- load_snap_counts(seasons = (2018:2023)) %>% filter(position == "RB")
+
+load_ff_playerids()
+
+#Selecting data
+
+ff2 <- ff2 %>% dplyr::select(game_id, season, week, player_id, full_name) %>% mutate(full_name = if_else(full_name == "De'Von Achane", "Devon Achane", full_name))
+ff2$season <- as.integer(ff2$season)
+
+
+df2 <-  df2 %>% dplyr::select(player_id, player_name, player_display_name, season, week, carries, rushing_yards,
+                              rushing_tds, rushing_fumbles, rushing_fumbles_lost, rushing_first_downs, rushing_epa, rushing_2pt_conversions,
+                              receptions, receiving_yards, receiving_tds, receiving_first_downs, receiving_fumbles,
+                              receiving_fumbles_lost, receiving_air_yards, receiving_yards_after_catch, targets, wopr, racr, target_share, air_yards_share, fantasy_points_ppr)
+
+ids <- load_ff_playerids() %>% dplyr::select(gsis_id, pfr_id, age)
+
+snaps <- snaps %>% dplyr::select(game_id, pfr_player_id, offense_snaps, offense_pct)
+
+#Merging data
+
+game_df2 <- df2 %>% inner_join(ff2, by = c("season" = "season", "week" = "week", "player_id" = "player_id", "player_display_name" = "full_name"))
+game_df2 <- game_df2 %>% dplyr::select(game_id, everything())
+
+df2_id <- game_df2 %>% inner_join(ids, by = c("player_id" = "gsis_id"))
+
+
+
+
+snaps_df <- df2_id %>% inner_join(snaps, by = c("game_id" = "game_id", "pfr_id" = "pfr_player_id"))
+
+#Feature engineering
+colSums(is.na(snaps_df))
+
+snaps_df$wopr[is.na(snaps_df$wopr)] <- 0
+snaps_df$racr[is.na(snaps_df$racr)] <- 0
+snaps_df$target_share[is.na(snaps_df$target_share)] <- 0
+snaps_df$air_yards_share[is.na(snaps_df$air_yards_share)] <- 0
+snaps_df$rushing_epa[is.na(snaps_df$rushing_epa)] <- 0
+
+snaps_df <- snaps_df %>%
+  mutate(
+    wopr = round(wopr, 2),
+    racr = round(racr, 2),
+    air_yards_share = round(air_yards_share, 2),
+    target_share = round(target_share, 2),
+    age = round(age, 0)
+  )
+
+rbs_set <- snaps_df %>% dplyr::select(-game_id, -player_id, -player_name, -player_display_name, -pfr_id)
+
+#Partition data for XgBoost
+train_indices <- sample(1:nrow(rbs_set), size = floor(0.7 * nrow(rbs_set)))
+
+# Split the data
+train_data <- rbs_set[train_indices, ]
+test_data <- rbs_set[-train_indices, ]
+
+dtrain <- xgb.DMatrix(data = as.matrix(train_data %>% dplyr::select(-fantasy_points_ppr)),
+                      label = train_data$fantasy_points_ppr)
+
+# Prepare testing data
+dtest <- xgb.DMatrix(data = as.matrix(test_data %>% dplyr::select(-fantasy_points_ppr)),
+                     label = test_data$fantasy_points_ppr)
+
+#XGBoost
+
+params <- list(
+  booster = "gbtree",
+  objective = "reg:squarederror",
+  eta = 0.3,
+  gamma = 0,
+  max_depth = 6,
+  min_child_weight = 1,
+  subsample = 1,
+  colsample_bytree = 1
+)
+
+
+# Train the model
+num.round <- 25
+bst <- xgb.train(params = params, data = dtrain, nrounds = num.round)
+
+# Predict on test set
+ypred <- predict(bst, dtest)
+
+# Calculate RMSE
+actuals <- test_data$fantasy_points_ppr
+rmse <- sqrt(mean((ypred - actuals)^2))
+print(paste("RMSE:", rmse))
+
+# Calculate the median fantasy points from the training data
+median_fantasy_points <- median(train_data$fantasy_points_ppr)
+
+# Predictions based on the median
+median_predictions <- rep(median_fantasy_points, length(test_data$fantasy_points_ppr))
+
+# Calculate RMSE using the median as the benchmark
+rmse_median <- sqrt(mean((test_data$fantasy_points_ppr - median_predictions)^2))
+print(paste("RMSE with median benchmark:", rmse_median))
+
+# Calculate the average fantasy points from the training data
+average_fantasy_points <- mean(train_data$fantasy_points_ppr)
+
+# Predictions based on the average (for every instance in the test set, you predict the training set average)
+average_predictions <- rep(average_fantasy_points, length(test_data$fantasy_points_ppr))
+
+# Calculate RMSE using the average as the benchmark
+rmse_average <- sqrt(mean((test_data$fantasy_points_ppr - average_predictions)^2))
+print(paste("RMSE with average benchmark:", rmse_average))
+
+#Calculating MAPE
+epsilon <- 1e-6  # Small constant to avoid division by zero
+mape <- mean(abs((actuals - ypred) / (actuals + epsilon))) * 100
+
+epsilon <- 1e-6  # Small constant to avoid division by zero
+mape_median_adjusted <- mean(abs((test_data$fantasy_points_ppr - median_predictions) / (test_data$fantasy_points_ppr + epsilon))) * 100
+mape_average_adjusted <- mean(abs((test_data$fantasy_points_ppr - average_predictions) / (test_data$fantasy_points_ppr + epsilon))) * 100
+
+print(paste("Adjusted MAPE with median benchmark:", mape_median_adjusted))
+print(paste("Adjusted MAPE with average benchmark:", mape_average_adjusted))
+
+vip(bst) + theme_clean()
+
+
+#Creating new dataset for model to predict
+snaps_df <- snaps_df %>% relocate(names(.)[ncol(.)-3], .after = names(.)[4])
+
+adjust <- names(snaps_df)[-(1:7)]
+
+
+grouped <-snaps_df %>% filter(season == 2023) %>%
+  group_by(player_name) %>%
+  mutate(
+    across(
+      .cols = all_of(adjust),
+      .fns = ~ .x +runif(length(.x), -5, 5),
+      .names = "adjusted_{.col}"
+    )
+  ) %>%
+  ungroup()
+
+grouped <- snaps_df %>%
+  dplyr::select(-game_id, -player_id, -player_name, -pfr_id) %>%
+  group_by(player_display_name, season) %>%
+  summarize(
+    games_played = n(),
+    across(carries:offense_pct, mean, na.rm = TRUE)
+  ) %>%
+  dplyr::select(-racr)
+
+active_rbs_2023 <- snaps_df %>%
+  filter(season == 2023) %>%
+  distinct(player_display_name)
+
+yearly_rbs <- snaps_df %>%
+  dplyr::select(-game_id, -player_id, -player_name, -pfr_id) %>%
+  filter(player_display_name %in% active_rbs_2023$player_display_name) %>% # Keep only RBs active in 2023
+  group_by(player_display_name, season) %>%
+  summarize(
+    games_played = n(),
+    across(carries:offense_pct, mean, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>% mutate(across(where(is.numeric), ~round(., 2)))
+
+colSums(is.na(grouped))
+
+
+
+#THINGS to add: YPC, FPPC, FPPT
+
+library(tseries)
+library(forecast)
+
+#Trying out time series
+
+sched <- load_schedules(2018:2023) %>% dplyr::select("game_id", "gameday")
+snaps_df <- sched %>% inner_join(snaps_df, by = c("game_id"))
+
+Dalvin <-  snaps_df %>% filter(player_display_name == "Dalvin Cook")
+Dalvin <- Dalvin %>% dplyr::select(-game_id, -player_id, -player_name, -age, -pfr_id, -player_display_name)
+
+rb_ts <- ts(data = Dalvin, start = min(Dalvin$season), frequency = 1)
+
+lag.select <- VARselect(rb_ts, lag.max = 1, type = "both")
+optimal.lag <- lag.select$selection["AIC(n)"]
+var.model <- VAR(rb_ts, p = optimal.lag, type = "both")
+
+summary(var.model)
+
+sapply(Dalvin, sd)
+
+#Can look to create leading and lagging features to get a better scope of in-game performance
+
+Dalvin$time_index <- with(Dalvin, as.numeric(interaction(season, week, drop = TRUE)))
+
+#Splitting the datasets
+cook_rush <- Dalvin %>% dplyr::select(gameday, season, week, carries, rushing_yards, rushing_tds, rushing_fumbles, rushing_fumbles, rushing_fumbles_lost, rushing_first_downs, rushing_epa, rushing_2pt_conversions)
+cook_rec <- Dalvin %>% dplyr::select(season, week, receptions, receiving_yards, receiving_tds, receiving_first_downs, receiving_fumbles, receiving_fumbles_lost, receiving_air_yards, receiving_yards_after_catch)
+cook_targ <- Dalvin %>% dplyr::select(season, week, targets, wopr, racr, target_share, offense_snaps, offense_pct, air_yards_share)
+
+#Trying it out on the rushing variables
+
+cook_rush$gameday <- as.Date(cook_rush$gameday)
+
+rb_ts <- ts(data = cook_rush, start = min(cook_rush$gameday), frequency = 1)
+
+#Using zoo in order to fix the season-week variable
+
+
+
+# Then, create a zoo object
+rb_zoo <- zoo(cook_rush$rushing_yards, order.by = cook_rush$gameday)
+
+
+#Filling in these averages by season
+season_averages <- cook_rush %>%
+  group_by(season) %>%
+  summarize(
+    games_played = n(),
+    across(carries:rushing_2pt_conversions, mean, na.rm = TRUE))
+
+cook_rush <- cook_rush %>% filter(week <= 18)
+cook_rush$time_index <- seq_along(cook_rush$gameday)
+
+
+# Determine optimal lag length
+lag_selection <- VARselect(zoo_object, lag.max = 5, type = "both")
+optimal_lag <- lag_selection$selection["AIC"]
+
+# Fit VAR model
+var_model <- VAR(zoo_object, p = 4, type = "both")
+
+forecast_results <- predict(var_model, n.ahead = 16)
+
+#Merging schedules to predict datetime
+sched <- load_schedules(2018:2023) %>% dplyr::select("game_id", "gameday")
+sched_snaps <- game_df2 %>% inner_join(ids, by = c("player_id" = "gsis_id"))
+cook_rush$time_index <- seq_along(cook_rush$gameday)
+
+
+
+#Merging schedules to predict datetime
+sched <- load_schedules(2018:2023) %>% dplyr::select("game_id", "gameday")
+sched_snaps <- game_df2 %>% inner_join(ids, by = c("player_id" = "gsis_id"))
